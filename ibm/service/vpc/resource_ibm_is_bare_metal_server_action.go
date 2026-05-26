@@ -9,6 +9,9 @@ import (
 	"log"
 	"time"
 
+	"github.com/IBM-Cloud/bluemix-go/api/container/containerv1"
+	"github.com/IBM-Cloud/bluemix-go/api/container/containerv2"
+	"github.com/IBM-Cloud/terraform-provider-ibm/ibm/conns"
 	"github.com/IBM-Cloud/terraform-provider-ibm/ibm/flex"
 	"github.com/IBM-Cloud/terraform-provider-ibm/ibm/validate"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
@@ -18,10 +21,17 @@ import (
 )
 
 const (
-	isBareMetalServerActionAvailable = "available"
-	isBareMetalServerActionPending   = "pending"
-	isBareMetalServerActionFailed    = "failed"
-	isBareMetalServerStopType        = "stop_type"
+	isBareMetalServerClusterID                   = "cluster_id"
+	isBareMetalServerStopType                    = "stop_type"
+	isBareMetalServerActionStatusUndeploying     = "undeploying"
+	isBareMetalServerActionStatusUndeployed      = "undeployed"
+	isBareMetalServerActionStatusReloadPending   = "reload_pending"
+	isBareMetalServerActionStatusReloading       = "reloading"
+	isBareMetalServerActionStatusReloadingFailed = "reloading_failed"
+	isBareMetalServerActionStatusReloaded        = "reloaded"
+	isBareMetalServerActionStatusDeploying       = "deploying"
+	isBareMetalServerActionStatusDeployFailed    = "deploy_failed"
+	isBareMetalServerActionStatusDeployed        = "deployed"
 )
 
 func ResourceIBMIsBareMetalServerAction() *schema.Resource {
@@ -33,9 +43,10 @@ func ResourceIBMIsBareMetalServerAction() *schema.Resource {
 		Importer:      &schema.ResourceImporter{},
 
 		Timeouts: &schema.ResourceTimeout{
-			Create: schema.DefaultTimeout(10 * time.Minute),
-			Update: schema.DefaultTimeout(10 * time.Minute),
-			Delete: schema.DefaultTimeout(10 * time.Minute),
+			Create:  schema.DefaultTimeout(10 * time.Minute),
+			Update:  schema.DefaultTimeout(10 * time.Minute),
+			Delete:  schema.DefaultTimeout(10 * time.Minute),
+			Default: schema.DefaultTimeout(45 * time.Minute),
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -56,8 +67,13 @@ func ResourceIBMIsBareMetalServerAction() *schema.Resource {
 			isBareMetalServerAction: {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validate.InvokeValidator("ibm_is_bare_metal_server", isBareMetalServerAction),
-				Description:  "This restart/start/stops a bare metal server.",
+				ValidateFunc: validate.InvokeValidator("ibm_is_bare_metal_server_action", isBareMetalServerAction),
+				Description:  "This reload/restart/start/stops a bare metal server.",
+			},
+			isBareMetalServerClusterID: {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Cluster identifier, dedicated for worker reload",
 			},
 			isBareMetalServerStatus: {
 				Type:        schema.TypeString,
@@ -95,7 +111,7 @@ func ResourceIBMIsBareMetalServerAction() *schema.Resource {
 
 func ResourceIBMISBareMetalServerActionValidator() *validate.ResourceValidator {
 	bareMetalServerStopTypes := "soft, hard"
-	bareMetalServerActions := "start, restart, stop"
+	bareMetalServerActions := "start, restart, stop, reload"
 	validateSchema := make([]validate.ValidateSchema, 0)
 
 	validateSchema = append(validateSchema,
@@ -133,7 +149,8 @@ func resourceIBMISBareMetalServerActionCreate(context context.Context, d *schema
 	if bmsAction, ok := d.GetOk(isBareMetalServerAction); ok {
 		bareMetalServerAction = bmsAction.(string)
 	}
-	if bareMetalServerAction == "stop" {
+	switch bareMetalServerAction {
+	case "stop":
 		bareMetalServerStopType := "hard"
 		if stopType, ok := d.GetOk(isBareMetalServerStopType); ok {
 			bareMetalServerStopType = stopType.(string)
@@ -156,8 +173,12 @@ func resourceIBMISBareMetalServerActionCreate(context context.Context, d *schema
 			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
 			return tfErr.GetDiag()
 		}
-	} else if bareMetalServerAction == "start" {
-
+		d.SetId(bareMetalServerId)
+		diagErr := bareMetalServerActionGet(context, sess, bareMetalServerId, d)
+		if diagErr != nil {
+			return diagErr
+		}
+	case "start":
 		createBareMetalServerStartOptions := &vpcv1.StartBareMetalServerOptions{
 			ID: &bareMetalServerId,
 		}
@@ -174,7 +195,12 @@ func resourceIBMISBareMetalServerActionCreate(context context.Context, d *schema
 			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
 			return tfErr.GetDiag()
 		}
-	} else if bareMetalServerAction == "restart" {
+		d.SetId(bareMetalServerId)
+		diagErr := bareMetalServerActionGet(context, sess, bareMetalServerId, d)
+		if diagErr != nil {
+			return diagErr
+		}
+	case "restart":
 		createBareMetalServerRestartOptions := &vpcv1.RestartBareMetalServerOptions{
 			ID: &bareMetalServerId,
 		}
@@ -191,11 +217,44 @@ func resourceIBMISBareMetalServerActionCreate(context context.Context, d *schema
 			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
 			return tfErr.GetDiag()
 		}
-	}
-	d.SetId(bareMetalServerId)
-	diagErr := bareMetalServerActionGet(context, sess, bareMetalServerId, d)
-	if diagErr != nil {
-		return diagErr
+		d.SetId(bareMetalServerId)
+		diagErr := bareMetalServerActionGet(context, sess, bareMetalServerId, d)
+		if diagErr != nil {
+			return diagErr
+		}
+	case "reload":
+		clusterClient, err := meta.(conns.ClientSession).ContainerAPI()
+		if err != nil {
+			tfErr := flex.TerraformErrorf(err, fmt.Sprintf("ContainerAPI client initialization failed: %s", err.Error()), "ibm_is_bare_metal_server_action", "create")
+			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
+			return tfErr.GetDiag()
+		}
+		workersAPI := clusterClient.Workers()
+
+		params := containerv1.WorkerUpdateParam{
+			Action: "reload",
+		}
+
+		err = workersAPI.Update("", bareMetalServerId, params, containerv1.ClusterTargetHeader{})
+		if err != nil {
+			tfErr := flex.TerraformErrorf(err, fmt.Sprintf("ReloadBareMetalServerWithContext failed: %s", err.Error()), "ibm_is_bare_metal_server_action", "create")
+			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
+			return tfErr.GetDiag()
+		}
+		vpcClusterClient, err := meta.(conns.ClientSession).VpcContainerAPI()
+		if err != nil {
+			tfErr := flex.TerraformErrorf(err, fmt.Sprintf("VpcContainerAPI client initialization failed: %s", err.Error()), "ibm_is_bare_metal_server_action", "create")
+			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
+			return tfErr.GetDiag()
+		}
+		vpcWorkerAPI := vpcClusterClient.Workers()
+		_, waitErr := isWaitForBareMetalServerReloadAvailable(vpcWorkerAPI, bareMetalServerId, d.Timeout(schema.TimeoutDefault), d)
+		if waitErr != nil {
+			tfErr := flex.TerraformErrorf(err, fmt.Sprintf("ReloadBareMetalServerWithContext failed: %s", waitErr.Error()), "ibm_is_bare_metal_server_action", "create")
+			log.Printf("[DEBUG]\n%s", tfErr.GetDebugMessage())
+			return tfErr.GetDiag()
+		}
+		d.SetId(bareMetalServerId)
 	}
 	return nil
 }
@@ -355,7 +414,22 @@ func isWaitForBareMetalServerActionAvailable(client *vpcv1.VpcV1, id string, tim
 		Delay:      10 * time.Second,
 		MinTimeout: 10 * time.Second,
 	}
-	return stateConf.WaitForState()
+	return stateConf.WaitForStateContext(context.Background())
+}
+
+func isWaitForBareMetalServerReloadAvailable(client containerv2.Workers, id string, timeout time.Duration, d *schema.ResourceData) (interface{}, error) {
+	log.Printf("Waiting for Bare Metal Server (%s) to be running.", id)
+	stateConf := &resource.StateChangeConf{
+
+		Pending: []string{isBareMetalServerActionStatusUndeploying, isBareMetalServerActionStatusUndeployed,
+			isBareMetalServerActionStatusReloadPending, isBareMetalServerActionStatusReloading, isBareMetalServerActionStatusReloaded, isBareMetalServerActionStatusDeploying},
+		Target:     []string{isBareMetalServerActionStatusDeployed, isBareMetalServerActionStatusDeployFailed, isBareMetalServerActionStatusReloadingFailed},
+		Refresh:    isBareMetalWorkerReloadRefreshFunc(client, id, d),
+		Timeout:    timeout,
+		Delay:      10 * time.Second,
+		MinTimeout: 10 * time.Second,
+	}
+	return stateConf.WaitForStateContext(context.Background())
 }
 
 func isBareMetalServerActionRefreshFunc(client *vpcv1.VpcV1, id string, d *schema.ResourceData, communicator chan interface{}) resource.StateRefreshFunc {
@@ -389,5 +463,30 @@ func isBareMetalServerActionRefreshFunc(client *vpcv1.VpcV1, id string, d *schem
 
 		}
 		return bms, isBareMetalServerStatusPending, nil
+	}
+}
+
+func isBareMetalWorkerReloadRefreshFunc(client containerv2.Workers, id string, d *schema.ResourceData) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		clusterID := ""
+		if id, ok := d.GetOk(isBareMetalServerClusterID); ok {
+			clusterID = id.(string)
+		}
+		if clusterID == "" {
+			return nil, "", fmt.Errorf("[ERROR] cluster_id is required for bare metal server worker reload operation")
+		}
+		worker, err := client.Get(clusterID, id, containerv2.ClusterTargetHeader{})
+		if err != nil {
+			return nil, "", fmt.Errorf("[ERROR] Error getting Bare Metal Server Worker Node: %s", err)
+		}
+		switch worker.LifeCycle.ActualState {
+		case "reloading_failed":
+			return worker, worker.LifeCycle.ActualState, fmt.Errorf("[ERROR] Error Bare Metal Server Worker Node is in reloading_failed state")
+
+		case "deploy_failed":
+			return worker, worker.LifeCycle.ActualState, fmt.Errorf("[ERROR] Error Bare Metal Server Worker Node is in deploy_failed state")
+		}
+
+		return worker, worker.LifeCycle.ActualState, nil
 	}
 }
