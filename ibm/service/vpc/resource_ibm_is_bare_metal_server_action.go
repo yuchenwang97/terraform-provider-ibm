@@ -426,7 +426,7 @@ func isWaitForBareMetalServerReloadAvailable(client containerv2.Workers, id stri
 		Target:     []string{isBareMetalServerActionStatusDeployed, isBareMetalServerActionStatusDeployFailed, isBareMetalServerActionStatusReloadingFailed},
 		Refresh:    isBareMetalWorkerReloadRefreshFunc(client, id, d),
 		Timeout:    timeout,
-		Delay:      10 * time.Second,
+		Delay:      20 * time.Second,
 		MinTimeout: 10 * time.Second,
 	}
 	return stateConf.WaitForStateContext(context.Background())
