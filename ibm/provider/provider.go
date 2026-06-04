@@ -2125,6 +2125,7 @@ func Validator() validate.ValidatorDict {
 				"ibm_container_worker_pool":                      kubernetes.ResourceIBMContainerWorkerPoolValidator(),
 				"ibm_container_vpc_worker_pool":                  kubernetes.ResourceIBMContainerVPCWorkerPoolValidator(),
 				"ibm_container_vpc_worker":                       kubernetes.ResourceIBMContainerVPCWorkerValidator(),
+				"ibm_container_vpc_worker_reload":                kubernetes.ResourceIBMContainerVPCWorkerReloadValidator(),
 				"ibm_container_vpc_cluster":                      kubernetes.ResourceIBMContainerVpcClusterValidator(),
 				"ibm_cos_bucket":                                 cos.ResourceIBMCOSBucketValidator(),
 				"ibm_cr_namespace":                               registry.ResourceIBMCrNamespaceValidator(),
